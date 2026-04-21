@@ -6,16 +6,6 @@
 
 ---
 
-## Team
-
-| Name | Roll Number |
-|---|---|
-| Aaryan Kashyap | 2023114006 |
-| Amisha | 2023114003 |
-| Agrim Mittal | 2022101040 |
-
----
-
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
