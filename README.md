@@ -1,4 +1,4 @@
-# 📁 GFS — Mini Google File System
+# GFS — Mini Google File System
 ### Distributed Systems Project · Team: Eventually Consistent
 
 > A scaled-down replica of the [Google File System (2003)](https://static.googleusercontent.com/media/research.google.com/en//archive/gfs-sosp2003.pdf).  
@@ -6,7 +6,7 @@
 
 ---
 
-## 👥 Team
+## Team
 
 | Name | Roll Number |
 |---|---|
@@ -16,7 +16,7 @@
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
 2. [Repository Structure](#repository-structure)
