@@ -3,6 +3,7 @@ import threading
 from concurrent import futures
 import grpc
 import os
+from lease import LeaseManager
 
 # Import generated stubs
 import master_pb2
@@ -20,7 +21,8 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         self.oplog = OperationLog(f"{log_dir}/gfs.log")
         self.locks = NamespaceLockManager()
         self.heartbeat = HeartbeatMonitor(self.store)
-        
+        self.lease_manager = LeaseManager(self.store) # ADD THIS LINE
+
         self._restore_state()
         
         # Start the dead server detection thread
@@ -82,14 +84,24 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 context.abort(grpc.StatusCode.NOT_FOUND, "Chunk not found")
             
             # Allocate new chunk
+            # Allocate new chunk
             locks = self.locks.acquire_for_operation(filepath)
             try:
+                import random
+                active_servers = list(self.heartbeat._last_seen.keys())
+                if not active_servers:
+                    context.abort(grpc.StatusCode.UNAVAILABLE, "No active chunkservers available")
+                
                 handle = self.store.allocate_chunk(filepath)
+                
+                # The Master chooses where to place the initially empty replicas
+                chosen = random.sample(active_servers, min(3, len(active_servers)))
+                self.store.chunk_map[handle].replicas = chosen
+                
                 self.oplog.append('ALLOCATE_CHUNK', {'filename': filepath, 'chunk_handle': handle})
             finally:
                 for lock in reversed(locks):
                     lock.release()
-            chunk_index = len(self.store.file_chunks[filepath]) - 1
 
         chunk_handle = self.store.file_chunks[filepath][chunk_index]
         chunk_meta = self.store.chunk_map[chunk_handle]
@@ -97,9 +109,13 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         # Filter out stale replicas
         healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
         
+        # Check lease validity, grant if missing
+        if not self.lease_manager.has_valid_lease(chunk_handle):
+            self.lease_manager.grant_lease(chunk_handle)
+
         primary = chunk_meta.primary if chunk_meta.primary else ""
         secondaries = [r for r in healthy_replicas if r != primary]
-
+        
         return master_pb2.ChunkLocResponse(
             chunk_handle=chunk_handle,
             primary_address=primary,

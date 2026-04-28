@@ -44,18 +44,72 @@ public:
     }
 
     Status ForwardWrite(ServerContext* ctx, const gfs::WriteRequest* req, gfs::WriteResponse* resp) override {
-        // Step 3 of the Write Pipeline: Decouple data flow from control flow.
-        // We buffer the data here, but DO NOT commit it to disk yet.
+        // Step 3: Decouple data flow. Buffer it locally first.
         std::vector<uint8_t> data(req->data().begin(), req->data().end());
         std::string key = std::to_string(req->chunk_handle()) + "_" + std::to_string(req->serial_number());
         buffer_.put(key, req->chunk_handle(), data);
         
+        // Pipeline the data to the next secondary in the chain
+        if (req->forward_to_size() > 0) {
+            std::string next_target = req->forward_to(0);
+            auto channel = grpc::CreateChannel(next_target, grpc::InsecureChannelCredentials());
+            auto next_stub = gfs::ChunkService::NewStub(channel);
+            
+            gfs::WriteRequest next_req = *req;
+            next_req.clear_forward_to();
+            // Pass along the rest of the chain
+            for (int i = 1; i < req->forward_to_size(); i++) {
+                next_req.add_forward_to(req->forward_to(i));
+            }
+            
+            gfs::WriteResponse next_resp;
+            grpc::ClientContext next_ctx;
+            Status status = next_stub->ForwardWrite(&next_ctx, next_req, &next_resp);
+            if (!status.ok()) std::cerr << "Pipeline forwarding failed!" << std::endl;
+        }
+
         resp->set_success(true);
         return Status::OK;
     }
 
     Status WriteChunk(ServerContext* ctx, const gfs::WriteRequest* req, gfs::WriteResponse* resp) override {
-        // TODO: Will be implemented in Phase 3 (Pipeline Commit & Leases)
+        std::string key = std::to_string(req->chunk_handle()) + "_" + std::to_string(req->serial_number());
+        std::vector<uint8_t> data;
+        
+        try {
+            data = buffer_.take(key); // Retrieve the buffered data
+        } catch (const std::exception& e) {
+            resp->set_success(false);
+            resp->set_error_message("Data not found in buffer for commit");
+            return Status::OK;
+        }
+
+        // Apply locally to disk and update checksum
+        storage_.write(req->chunk_handle(), req->offset(), data);
+        checksum_.update(req->chunk_handle(), req->offset() / (64 * 1024), ChecksumStore::compute(data));
+
+        // Forward the commit command to all secondaries (Step 5)
+        for (const std::string& secondary_addr : req->forward_to()) {
+            auto channel = grpc::CreateChannel(secondary_addr, grpc::InsecureChannelCredentials());
+            auto sec_stub = gfs::ChunkService::NewStub(channel);
+            
+            gfs::WriteRequest fwd_commit;
+            fwd_commit.set_chunk_handle(req->chunk_handle());
+            fwd_commit.set_offset(req->offset());
+            fwd_commit.set_serial_number(req->serial_number());
+            // We DO NOT send the data payload again, it's already in their buffers!
+            
+            gfs::WriteResponse sec_resp;
+            grpc::ClientContext fwd_ctx;
+            Status status = sec_stub->WriteChunk(&fwd_ctx, fwd_commit, &sec_resp);
+            
+            if (!status.ok() || !sec_resp.success()) {
+                resp->set_success(false);
+                resp->set_error_message("Secondary commit failed: " + secondary_addr);
+                return Status::OK;
+            }
+        }
+
         resp->set_success(true);
         return Status::OK;
     }
@@ -86,8 +140,9 @@ int main(int argc, char** argv) {
     if (const char* env_p = std::getenv("GFS_CS_PORT")) cs_port = env_p;
     if (const char* env_d = std::getenv("GFS_DATA_DIR")) data_dir = env_d;
 
-    std::string my_address = "chunkserver:" + cs_port; 
-    std::string server_address = "0.0.0.0:" + cs_port;
+    std::string cs_hostname = "localhost";
+    if (const char* env_h = std::getenv("HOSTNAME")) cs_hostname = env_h;
+    std::string my_address = cs_hostname + ":" + cs_port;    std::string server_address = "0.0.0.0:" + cs_port;
 
     // Start Heartbeat Sender in background
     auto channel = grpc::CreateChannel(master_addr, grpc::InsecureChannelCredentials());

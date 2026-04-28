@@ -27,6 +27,10 @@ chunkserver/*.pb.cc
 chunkserver/*.pb.h
 chunkserver/*.grpc.pb.cc
 chunkserver/*.grpc.pb.h
+chunkserver/*_pb2.py
+chunkserver/*_pb2_grpc.py
+chunkserver/*_pb2.pyi
+.pytest_cache/
 
 # Local data directories (so you don't commit giant chunks)
 /data/
