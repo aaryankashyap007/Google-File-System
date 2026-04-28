@@ -1,6 +1,4 @@
 FROM ubuntu:22.04
-
-# Prevent interactive prompts during apt-get
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
@@ -12,11 +10,13 @@ COPY . /app
 
 RUN mkdir -p /chunks
 
-# Generate C++ stubs
+# Generate C++ stubs for BOTH chunk.proto and master.proto
 RUN protoc -I./proto --cpp_out=./chunkserver \
     --grpc_out=./chunkserver \
-    --plugin=protoc-gen-grpc=`which grpc_cpp_plugin` ./proto/chunk.proto
+    --plugin=protoc-gen-grpc=`which grpc_cpp_plugin` ./proto/*.proto
 
-# Placeholder command: keeps container alive so docker-compose up works for Phase 0
-# Replace with actual binary execution in Phase 2
-CMD ["tail", "-f", "/dev/null"]
+# Build the C++ Chunkserver
+WORKDIR /app/chunkserver
+RUN cmake . && make
+
+CMD ["./chunkserver"]
