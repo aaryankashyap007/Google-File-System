@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# C++ & Build files
+build/
+cmake-build-*/
+*.o
+*.out
+*.a
+*.so
+*.dylib
+
+# Auto-generated gRPC stubs (we generate these, we don't track them)
+# Python stubs
+master/*_pb2.py
+master/*_pb2_grpc.py
+master/*_pb2.pyi
+client/*_pb2.py
+client/*_pb2_grpc.py
+# C++ stubs
+chunkserver/*.pb.cc
+chunkserver/*.pb.h
+chunkserver/*.grpc.pb.cc
+chunkserver/*.grpc.pb.h
+
+# Local data directories (so you don't commit giant chunks)
+/data/
+/chunks/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store

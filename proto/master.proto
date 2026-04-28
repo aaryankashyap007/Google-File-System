@@ -1,0 +1,72 @@
+syntax = "proto3";
+package gfs;
+
+service MasterService {
+  rpc CreateFile        (CreateFileRequest)     returns (CreateFileResponse);
+  rpc OpenFile          (OpenFileRequest)       returns (OpenFileResponse);
+  rpc GetChunkLocations (ChunkLocRequest)       returns (ChunkLocResponse);
+  rpc ReportChunk       (ReportChunkRequest)    returns (ReportChunkResponse);
+  rpc HeartBeat         (HeartBeatRequest)      returns (HeartBeatResponse);
+  rpc DeleteFile        (DeleteFileRequest)     returns (DeleteFileResponse);
+}
+
+message CreateFileRequest {
+  string filename = 1;
+}
+
+message CreateFileResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message OpenFileRequest {
+  string filename = 1;
+  string mode = 2;
+}
+
+message OpenFileResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message ChunkLocRequest {
+  string filename = 1;
+  int32  chunk_index = 2;
+  bool   create_if_missing = 3;
+}
+
+message ChunkLocResponse {
+  int64  chunk_handle = 1;
+  string primary_address = 2;
+  repeated string secondary_addresses = 3;
+  int32  chunk_version = 4;
+}
+
+message ReportChunkRequest {
+  string chunkserver_address = 1;
+  int64 chunk_handle = 2;
+  int32 chunk_version = 3;
+}
+
+message ReportChunkResponse {
+  bool success = 1;
+}
+
+message HeartBeatRequest {
+  string chunkserver_address = 1;
+  repeated int64 chunk_handles = 2;
+  repeated int32 chunk_versions = 3;
+}
+
+message HeartBeatResponse {
+  repeated int64 chunks_to_delete = 1;
+}
+
+message DeleteFileRequest {
+  string filename = 1;
+}
+
+message DeleteFileResponse {
+  bool success = 1;
+  string error_message = 2;
+}

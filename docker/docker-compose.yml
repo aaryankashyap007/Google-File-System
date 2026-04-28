@@ -1,0 +1,52 @@
+version: '3.8'
+services:
+  master:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.master
+    ports:
+      - "50051:50051"
+    volumes:
+      - master_data:/data
+    environment:
+      - GFS_MASTER_PORT=50051
+      - GFS_LOG_DIR=/data/oplog
+
+  chunkserver1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.chunkserver
+    environment:
+      - GFS_MASTER_ADDR=master:50051
+      - GFS_CS_PORT=50052
+      - GFS_DATA_DIR=/chunks
+    volumes:
+      - cs1_data:/chunks
+
+  chunkserver2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.chunkserver
+    environment:
+      - GFS_MASTER_ADDR=master:50051
+      - GFS_CS_PORT=50053
+      - GFS_DATA_DIR=/chunks
+    volumes:
+      - cs2_data:/chunks
+
+  chunkserver3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.chunkserver
+    environment:
+      - GFS_MASTER_ADDR=master:50051
+      - GFS_CS_PORT=50054
+      - GFS_DATA_DIR=/chunks
+    volumes:
+      - cs3_data:/chunks
+
+volumes:
+  master_data:
+  cs1_data:
+  cs2_data:
+  cs3_data:

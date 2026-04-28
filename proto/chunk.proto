@@ -1,0 +1,66 @@
+syntax = "proto3";
+package gfs;
+
+service ChunkService {
+  rpc ReadChunk    (ReadRequest)    returns (ReadResponse);
+  rpc WriteChunk   (WriteRequest)   returns (WriteResponse);
+  rpc AppendChunk  (AppendRequest)  returns (AppendResponse);
+  rpc DeleteChunk  (DeleteRequest)  returns (DeleteResponse);
+  rpc ForwardWrite (WriteRequest)   returns (WriteResponse); 
+  rpc CopyChunkTo  (CopyRequest)    returns (CopyResponse); 
+}
+
+message ReadRequest {
+  int64  chunk_handle = 1;
+  int32  offset = 2;
+  int32  length = 3;
+  int32  chunk_version = 4;
+}
+
+message ReadResponse {
+  bytes  data = 1;
+  bool   checksum_ok = 2;
+}
+
+message WriteRequest {
+  int64          chunk_handle = 1;
+  int32          offset = 2;
+  bytes          data = 3;
+  int32          serial_number = 4;
+  repeated string forward_to = 5;   
+}
+
+message WriteResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message AppendRequest {
+  int64 chunk_handle = 1;
+  bytes data = 2;
+  repeated string forward_to = 3;
+}
+
+message AppendResponse {
+  int32 offset_written = 1;
+  bool retry_on_next_chunk = 2;
+  string error_message = 3;
+}
+
+message DeleteRequest {
+  int64 chunk_handle = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+}
+
+message CopyRequest {
+  int64 chunk_handle = 1;
+  string target_address = 2;
+}
+
+message CopyResponse {
+  bool success = 1;
+  string error_message = 2;
+}
