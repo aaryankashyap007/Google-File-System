@@ -91,3 +91,41 @@ class GFSClient:
             remaining -= read_len
 
         return bytes(result)
+    
+    def record_append(self, filename: str, data: bytes) -> int:
+        """
+        Atomically appends data to filename.
+        Returns the offset at which data was written.
+        """
+        MAX_APPEND_SIZE = 16 * 1024 * 1024  # 16 MB = 1/4 of chunk size
+        if len(data) > MAX_APPEND_SIZE:
+            raise ValueError(f"Append data exceeds max size ({MAX_APPEND_SIZE} bytes)")
+
+        # Ask master for the LAST chunk of the file (-1)
+        raw = self.master_stub.GetChunkLocations(master_pb2.ChunkLocRequest(
+            filename=filename,
+            chunk_index=-1,
+            create_if_missing=True
+        ))
+
+        primary = raw.primary_address
+        secondaries = list(raw.secondary_addresses)
+        
+        if not primary:
+            raise IOError("No primary lease holder available for append")
+
+        # Send append request to the Primary
+        stub = self._get_chunk_stub(primary)
+        resp = stub.AppendChunk(chunk_pb2.AppendRequest(
+            chunk_handle=raw.chunk_handle,
+            data=data,
+            forward_to=secondaries
+        ))
+
+        if resp.retry_on_next_chunk:
+            # In a production GFS, the client would tell the master the chunk is full 
+            # and ask it to allocate a new one. For this MVP, we will just return -1.
+            print("Chunk is full! Needs padding and retry on next chunk.")
+            return -1
+
+        return resp.offset_written

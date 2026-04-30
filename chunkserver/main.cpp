@@ -2,6 +2,8 @@
 #include <memory>
 #include <string>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_map>
 #include <grpcpp/grpcpp.h>
 #include "chunk.grpc.pb.h"
 #include "master.grpc.pb.h"
@@ -115,7 +117,63 @@ public:
     }
 
     Status AppendChunk(ServerContext* ctx, const gfs::AppendRequest* req, gfs::AppendResponse* resp) override {
-        // TODO: Will be implemented in Phase 5 (Atomic Record Append)
+        std::mutex& chunk_mutex = get_chunk_mutex(req->chunk_handle());
+        std::lock_guard<std::mutex> lock(chunk_mutex);
+
+        int64_t handle = req->chunk_handle();
+        int32_t current_sz = storage_.get_size(handle);
+        int32_t record_sz = req->data().size();
+        int32_t max_sz = 64 * 1024 * 1024; // 64 MB
+
+        // 1. Check if record fits in this chunk
+        if (current_sz + record_sz > max_sz) {
+            // Pad this chunk to max size
+            std::vector<uint8_t> padding(max_sz - current_sz, 0);
+            storage_.write(handle, current_sz, padding);
+            
+            // Tell secondaries to pad too
+            for (const auto& sec_addr : req->forward_to()) {
+                auto channel = grpc::CreateChannel(sec_addr, grpc::InsecureChannelCredentials());
+                auto stub = gfs::ChunkService::NewStub(channel);
+                gfs::AppendRequest pad_req;
+                pad_req.set_chunk_handle(handle);
+                pad_req.set_data(std::string(padding.begin(), padding.end()));
+                gfs::AppendResponse pad_resp;
+                grpc::ClientContext pad_ctx;
+                stub->AppendChunk(&pad_ctx, pad_req, &pad_resp);
+            }
+            resp->set_retry_on_next_chunk(true);
+            return Status::OK;
+        }
+
+        // 2. Fits! Append at current end
+        std::vector<uint8_t> data(req->data().begin(), req->data().end());
+        int32_t offset = storage_.append(handle, data);
+        
+        // Update checksum
+        checksum_.update(handle, offset / (64 * 1024), ChecksumStore::compute(data));
+
+        // 3. Forward the exact append to secondaries
+        for (const std::string& sec_addr : req->forward_to()) {
+            auto channel = grpc::CreateChannel(sec_addr, grpc::InsecureChannelCredentials());
+            auto sec_stub = gfs::ChunkService::NewStub(channel);
+            
+            gfs::AppendRequest sec_req;
+            sec_req.set_chunk_handle(handle);
+            sec_req.set_data(req->data());
+            // Clear forward_to so secondaries don't forward it again!
+            
+            gfs::AppendResponse sec_resp;
+            grpc::ClientContext sec_ctx;
+            Status status = sec_stub->AppendChunk(&sec_ctx, sec_req, &sec_resp);
+            
+            if (!status.ok()) {
+                std::cerr << "[Chunkserver] Secondary append failed on " << sec_addr << std::endl;
+            }
+        }
+
+        resp->set_offset_written(offset);
+        resp->set_retry_on_next_chunk(false);
         return Status::OK;
     }
 
@@ -129,6 +187,17 @@ private:
     ChunkStorage storage_;
     ChecksumStore checksum_;
     WriteBuffer buffer_;
+    
+    std::mutex map_mutex_;
+    std::unordered_map<int64_t, std::unique_ptr<std::mutex>> chunk_mutexes_;
+
+    std::mutex& get_chunk_mutex(int64_t handle) {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (chunk_mutexes_.find(handle) == chunk_mutexes_.end()) {
+            chunk_mutexes_[handle] = std::make_unique<std::mutex>();
+        }
+        return *chunk_mutexes_[handle];
+    }
 };
 
 int main(int argc, char** argv) {

@@ -78,44 +78,52 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         if filepath not in self.store.namespace:
             context.abort(grpc.StatusCode.NOT_FOUND, "File not found")
 
-        # Handle appending/creating new chunks
-        if chunk_index == -1 or (chunk_index >= len(self.store.file_chunks.get(filepath, []))):
-            if not request.create_if_missing:
-                context.abort(grpc.StatusCode.NOT_FOUND, "Chunk not found")
+        # FIX: Acquire locks BEFORE checking chunk lengths to prevent concurrent 
+        # threads from creating multiple "first" chunks simultaneously!
+        locks = self.locks.acquire_for_operation(filepath)
+        try:
+            file_chunks = self.store.file_chunks.get(filepath, [])
             
-            # Allocate new chunk
-            # Allocate new chunk
-            locks = self.locks.acquire_for_operation(filepath)
-            try:
+            # Resolve -1 to the actual last chunk index safely inside the lock
+            if chunk_index == -1:
+                if len(file_chunks) > 0:
+                    chunk_index = len(file_chunks) - 1
+                else:
+                    chunk_index = 0
+
+            # If the chunk doesn't exist yet, allocate it
+            if chunk_index >= len(file_chunks):
+                if not request.create_if_missing:
+                    context.abort(grpc.StatusCode.NOT_FOUND, "Chunk not found")
+                
                 import random
                 active_servers = list(self.heartbeat._last_seen.keys())
                 if not active_servers:
-                    context.abort(grpc.StatusCode.UNAVAILABLE, "No active chunkservers available")
+                    context.abort(grpc.StatusCode.UNAVAILABLE, "No active servers")
                 
                 handle = self.store.allocate_chunk(filepath)
-                
-                # The Master chooses where to place the initially empty replicas
                 chosen = random.sample(active_servers, min(3, len(active_servers)))
                 self.store.chunk_map[handle].replicas = chosen
                 
                 self.oplog.append('ALLOCATE_CHUNK', {'filename': filepath, 'chunk_handle': handle})
-            finally:
-                for lock in reversed(locks):
-                    lock.release()
+                
+                chunk_index = len(self.store.file_chunks[filepath]) - 1
 
-        chunk_handle = self.store.file_chunks[filepath][chunk_index]
+            chunk_handle = self.store.file_chunks[filepath][chunk_index]
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
+        # The rest of the method remains exactly the same!
         chunk_meta = self.store.chunk_map[chunk_handle]
-        
-        # Filter out stale replicas
         healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
         
-        # Check lease validity, grant if missing
         if not self.lease_manager.has_valid_lease(chunk_handle):
             self.lease_manager.grant_lease(chunk_handle)
 
         primary = chunk_meta.primary if chunk_meta.primary else ""
         secondaries = [r for r in healthy_replicas if r != primary]
-        
+
         return master_pb2.ChunkLocResponse(
             chunk_handle=chunk_handle,
             primary_address=primary,
