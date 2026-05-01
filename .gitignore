@@ -1,42 +1,54 @@
-# Python
+# Python environment & cache
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
 venv/
-env/
 .env
 
-# C++ & Build files
+# C++ & CMake Build Artifacts
 build/
-cmake-build-*/
 *.o
-*.out
 *.a
-*.so
-*.dylib
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
 
-# Auto-generated gRPC stubs (we generate these, we don't track them)
-# Python stubs
-master/*_pb2.py
-master/*_pb2_grpc.py
-master/*_pb2.pyi
-client/*_pb2.py
-client/*_pb2_grpc.py
-# C++ stubs
-chunkserver/*.pb.cc
-chunkserver/*.pb.h
-chunkserver/*.grpc.pb.cc
-chunkserver/*.grpc.pb.h
-chunkserver/*_pb2.py
-chunkserver/*_pb2_grpc.py
-chunkserver/*_pb2.pyi
-.pytest_cache/
+# gRPC Auto-generated Stubs 
+# (These are generated inside the Docker containers during the build process)
+*_pb2.py
+*_pb2_grpc.py
+*_pb2.pyi
+*.pb.cc
+*.pb.h
+*.grpc.pb.cc
+*.grpc.pb.h
 
-# Local data directories (so you don't commit giant chunks)
-/data/
+# GFS Data, Trash, and Logs 
+# (Never commit actual chunk data or master oplogs)
 /chunks/
+/data/
+*.log
+.trash/
 
-# IDE & OS files
-.vscode/
-.idea/
+# Benchmark & Test Outputs 
+# (Prevents massive 3MB/5MB files from bloating your git history)
+*.bin
+*.dat
+test_file_*.txt
+concurrent_append_*.bin
+fault_test_*.bin
+
+# Random Scratch / Temporary Files
+scratch.py
+test.py
+temp/
+tmp/
+
+# OS generated files
 .DS_Store
+Thumbs.db
+
+
+.vscode

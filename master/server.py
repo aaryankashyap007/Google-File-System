@@ -4,6 +4,8 @@ from concurrent import futures
 import grpc
 import os
 from lease import LeaseManager
+from garbage_collection import GarbageCollector
+from replication import ReplicationManager
 
 # Import generated stubs
 import master_pb2
@@ -16,16 +18,29 @@ from heartbeat import HeartbeatMonitor
 class MasterServicer(master_pb2_grpc.MasterServiceServicer):
     def __init__(self):
         self.store = MetadataStore()
-        # Make sure the log directory exists based on our Docker env var
         log_dir = os.environ.get('GFS_LOG_DIR', '/data/oplog')
         self.oplog = OperationLog(f"{log_dir}/gfs.log")
         self.locks = NamespaceLockManager()
         self.heartbeat = HeartbeatMonitor(self.store)
-        self.lease_manager = LeaseManager(self.store) # ADD THIS LINE
+        self.lease_manager = LeaseManager(self.store)
+        
+        # --- NEW COMPONENTS ---
+        self.gc = GarbageCollector(self.store, self.oplog)
+        self.repl = ReplicationManager(self.store, self.heartbeat)
+        
+        # Monkey-patch the heartbeat monitor so it can trigger re-replication!
+        # (A bit hacky for the MVP, but it perfectly ties the components together)
+        original_handle_failure = self.heartbeat._handle_chunkserver_failure
+        def new_handle_failure(cs_address):
+            original_handle_failure(cs_address)
+            # Enqueue all under-replicated chunks
+            for handle, meta in list(self.store.chunk_map.items()):
+                if len(meta.replicas) < 3:
+                    self.repl.enqueue(handle, priority='high')
+        self.heartbeat._handle_chunkserver_failure = new_handle_failure
+        # ----------------------
 
         self._restore_state()
-        
-        # Start the dead server detection thread
         threading.Thread(target=self.heartbeat.check_dead_servers, daemon=True).start()
         print("[Master] Initialized and ready.")
 
@@ -67,6 +82,17 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
             self.oplog.append('CREATE_FILE', {'filename': filepath})
             
             return master_pb2.CreateFileResponse(success=True)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+    
+    def DeleteFile(self, request, context):
+        locks = self.locks.acquire_for_operation(request.filename)
+        try:
+            if request.filename not in self.store.namespace:
+                return master_pb2.DeleteFileResponse(success=False, error_message="File not found")
+            self.gc.soft_delete(request.filename)
+            return master_pb2.DeleteFileResponse(success=True)
         finally:
             for lock in reversed(locks):
                 lock.release()

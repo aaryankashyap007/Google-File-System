@@ -45,8 +45,22 @@ services:
     volumes:
       - cs3_data:/chunks
 
+  chunkserver4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.chunkserver
+    environment:
+      - GFS_MASTER_ADDR=master:50051
+      - GFS_CS_PORT=50055
+      - GFS_DATA_DIR=/chunks
+    volumes:
+      - cs4_data:/chunks
+    depends_on:
+      - master
+
 volumes:
   master_data:
   cs1_data:
   cs2_data:
   cs3_data:
+  cs4_data:

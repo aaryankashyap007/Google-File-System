@@ -183,6 +183,45 @@ public:
         return Status::OK;
     }
 
+    Status CopyChunkTo(ServerContext* ctx, const gfs::CopyRequest* req, gfs::CopyResponse* resp) override {
+        try {
+            // 1. Read the chunk from our local disk
+            int32_t size = storage_.get_size(req->chunk_handle());
+            if (size == 0) throw std::runtime_error("Local chunk is empty or missing");
+            auto data = storage_.read(req->chunk_handle(), 0, size);
+
+            // 2. Open a channel to the Target Chunkserver
+            auto channel = grpc::CreateChannel(req->target_address(), grpc::InsecureChannelCredentials());
+            auto target_stub = gfs::ChunkService::NewStub(channel);
+
+            gfs::WriteRequest fwd_req;
+            fwd_req.set_chunk_handle(req->chunk_handle());
+            fwd_req.set_offset(0);
+            fwd_req.set_data(std::string(data.begin(), data.end()));
+            fwd_req.set_serial_number(999999); // Dummy serial for cloning
+
+            gfs::WriteResponse write_resp;
+            grpc::ClientContext fwd_ctx;
+            
+            // 3. Push data to target's buffer
+            Status s1 = target_stub->ForwardWrite(&fwd_ctx, fwd_req, &write_resp);
+            if (!s1.ok()) throw std::runtime_error("Failed to forward data to target");
+
+            // 4. Tell target to commit the buffer to disk
+            grpc::ClientContext commit_ctx;
+            fwd_req.set_data(""); // Data already buffered
+            Status s2 = target_stub->WriteChunk(&commit_ctx, fwd_req, &write_resp);
+            if (!s2.ok() || !write_resp.success()) throw std::runtime_error("Failed to commit on target");
+
+            resp->set_success(true);
+            return Status::OK;
+        } catch (const std::exception& e) {
+            resp->set_success(false);
+            resp->set_error_message(e.what());
+            return Status::OK;
+        }
+    }
+
 private:
     ChunkStorage storage_;
     ChecksumStore checksum_;
