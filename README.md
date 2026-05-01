@@ -2,6 +2,14 @@
 
 A highly concurrent, fault-tolerant distributed file system inspired by the original 2003 Google File System paper. This project implements the core architecture of GFS, featuring a decoupled control plane and a high-performance data plane to handle massive parallel workloads.
 
+## 📖 Context & Motivation
+
+The original 2003 GFS paper revolutionized distributed storage by shifting the industry paradigm: **component failures are the norm, not the exception.** Rather than relying on highly specialized, expensive, and fault-tolerant hardware, GFS was designed to run on clusters of cheap, commodity machines. 
+
+This MVP was built to practically explore and solve the massive concurrency, synchronization, and self-healing challenges that arise in such environments. By utilizing Python for rapid control-plane orchestration and C++ for bare-metal data plane performance, this project demonstrates a modern, containerized approach to classic distributed systems engineering.
+
+---
+
 ## 🏗️ Architecture
 
 This implementation utilizes a containerized microservices architecture communicating via **gRPC**:
@@ -9,6 +17,21 @@ This implementation utilizes a containerized microservices architecture communic
 * **The Master (Python):** The brain of the cluster. Maintains all filesystem metadata, manages access control, grants primary chunk leases, monitors Chunkserver health via 15-second heartbeats, and orchestrates lazy garbage collection and re-replication. Metadata is kept entirely in RAM for speed, backed by a Write-Ahead Log (Oplog).
 * **The Chunkservers (C++):** High-performance storage nodes that store physical 64MB chunks on local disk. They handle the heavy lifting of data streaming, concurrent mutation locking, and checksum verification.
 * **The Client (Python):** A smart library embedded in user applications that caches metadata to minimize Master bottlenecking and streams data directly to/from Chunkservers.
+
+### 🔄 How It Works Under the Hood
+
+**The Read Path:**
+1. The Client asks the Master for the chunk locations of a specific file.
+2. The Master replies with the replica addresses.
+3. The Client caches this metadata, connects directly to the closest Chunkserver, and streams the data, completely bypassing the Master to prevent bottlenecks.
+
+**The Write Path (Decoupled Data Flow):**
+1. The Client asks the Master to allocate a new chunk or find the last chunk of a file.
+2. The Master grants a "Primary Lease" to one Chunkserver and designates the others as Secondaries.
+3. The Client pushes the raw bytes to a replica. The replicas forward the data to each other in a pipeline to maximize network bandwidth.
+4. Once all replicas have the data in their buffers, the Client signals the Primary. The Primary determines the serial write order, commits it to disk, and commands the Secondaries to commit in that exact same order.
+
+---
 
 ## ✨ Implemented Features
 
@@ -20,6 +43,8 @@ This MVP faithfully reproduces the hardest distributed systems problems solved i
 4. **Fault Tolerance & Self-Healing:** The Master monitors heartbeats. If a Chunkserver dies, the Master instantly evicts it, identifies under-replicated chunks, and commands surviving nodes to clone data to empty spare nodes.
 5. **Lazy Garbage Collection:** Files are soft-deleted and hidden. A background thread securely wipes orphaned metadata and commands Chunkservers to delete physical data during off-peak heartbeats.
 
+---
+
 ## 📂 File Structure
 ```text
 Google-File-System/
@@ -29,8 +54,8 @@ Google-File-System/
 │   └── test_e2e.py           # Validates pipeline and client cache
 ├── chunkserver/
 │   ├── CMakeLists.txt
-│   ├── main.cpp              # C++ gRPC Server, Locking, and Checksums
-│   └── protos/               # .proto definitions for Chunk/Master comms
+│   └── main.cpp              # C++ gRPC Server, Locking, and Checksums
+├── proto/                    # .proto definitions for Chunk/Master comms
 ├── client/
 │   ├── gfs_client.py         # Client API and cache management
 │   └── pipeline.py           # Network pipeline for chunk streaming
@@ -44,6 +69,27 @@ Google-File-System/
 │   └── server.py             # Python gRPC Server and lease management
 └── README.md
 ```
+
+### 🔍 Deep Dive: Codebase Glossary
+
+**`/benchmarks`**
+* `test_e2e.py`: The primary validation script. It tests the complete lifecycle: file creation, chunk allocation, data pipelining, primary lease commitment, and client cache invalidation/retrieval.
+* `bench_append.py`: Proves thread safety. Spawns 10 concurrent threads mimicking separate users appending to the same file simultaneously, verifying the C++ mutex locks prevent race conditions.
+* `bench_fault.py`: The fault tolerance showcase. Writes a payload, pauses for a manual node kill (`docker stop`), and tracks the Master as it heals the cluster by cloning data to a spare node.
+
+**`/chunkserver`**
+* `main.cpp`: The C++ engine. Exposes gRPC endpoints to accept data streams, manage per-chunk mutex locking for concurrent appends, execute Master commands (like garbage collection or chunk cloning), and perform raw POSIX disk I/O.
+
+**`/client`**
+* `gfs_client.py`: The user-facing SDK. Applications import this to interact with the cluster. It manages the `MetadataCache` to minimize trips to the Master.
+* `pipeline.py`: Implements the decoupled data flow. Responsible for pushing byte streams to the chunkserver replicas and triggering the final commit command.
+
+**`/master`**
+* `server.py`: The central nervous system. Maintains the `MetadataStore` (namespace, chunk-to-file mappings) entirely in memory. Handles file creation, lease granting, and monitors chunkserver heartbeats.
+* `garbage_collection.py`: Implements "Lazy Deletion." Renames deleted files to a hidden `.trash` namespace. A background thread later permanently drops the metadata and instructs chunkservers to wipe the physical disks.
+* `replication.py`: The self-healing engine. Triggered when the heartbeat monitor detects a dead chunkserver. It calculates which chunks are under-replicated and orchestrates the copying of data from healthy nodes to spare nodes.
+
+---
 
 ## 🚀 Getting Started
 
