@@ -47,6 +47,7 @@ class OperationLog:
                     "chunk_map": metadata_store.chunk_map,
                     "chunk_versions": metadata_store.chunk_versions,
                     "next_handle": metadata_store._next_handle,
+                    "_gc_pending": metadata_store._gc_pending,
                 }, f)
             
             os.rename(tmp_path, cp_path)

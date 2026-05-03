@@ -10,9 +10,18 @@ import master_pb2
 FILE_PATH = f"/fault_test_{int(time.time())}.bin"
 DATA_SIZE = 3 * 1024 * 1024  # 5 MB
 
+def port_to_container_name(port):
+    port_map = {
+        50052: "docker-chunkserver1-1",
+        50053: "docker-chunkserver2-1",
+        50054: "docker-chunkserver3-1",
+        50055: "docker-chunkserver4-1",
+    }
+    return port_map.get(port, None)
+
 def run_fault_test():
     print("\n" + "="*50)
-    print("🛡️  GFS FAULT TOLERANCE & RECOVERY TEST 🛡️")
+    print("  GFS FAULT TOLERANCE & RECOVERY TEST")
     print("="*50)
     
     client = GFSClient(master_addr="localhost:50051")
@@ -27,23 +36,25 @@ def run_fault_test():
     client.write(FILE_PATH, 0, test_data)
     print("   Data written successfully.")
 
-    # Get initial locations from Master
     loc = client.master_stub.GetChunkLocations(master_pb2.ChunkLocRequest(
         filename=FILE_PATH, chunk_index=0, create_if_missing=False
     ))
     
     initial_replicas = [loc.primary_address] + list(loc.secondary_addresses)
-    target_to_kill = initial_replicas[-1] # Pick the last secondary to kill
+    target_to_kill = initial_replicas[-1]
+    
+    port = int(target_to_kill.split(':')[1])
+    container_to_kill = port_to_container_name(port)
     
     print(f"\n3. Current Replicas for Chunk {loc.chunk_handle}:")
     for r in initial_replicas:
-        print(f"   ✅ {r}")
+        print(f"    {r}")
 
-    print("\n" + "🔥"*25)
+    print("\n" + "-"*25)
     print("ACTION REQUIRED ON YOUR HOST MACHINE!")
     print("Open a NEW terminal window and run this command:")
-    print(f"\n   sudo docker stop $(sudo docker ps -qf 'name={target_to_kill.split(':')[0]}')\n")
-    print("🔥"*25 + "\n")
+    print(f"\n   sudo docker stop {container_to_kill}\n")
+    print("-"*25 + "\n")
     
     input("Press ENTER here *after* you have stopped the container...")
 
@@ -52,16 +63,19 @@ def run_fault_test():
     
     recovered = False
     for i in range(20):
+        client.cache.invalidate(FILE_PATH, 0)
         loc = client.master_stub.GetChunkLocations(master_pb2.ChunkLocRequest(
             filename=FILE_PATH, chunk_index=0, create_if_missing=False
         ))
+        
+        # DEBUG: Print raw response
+        print(f"   [DEBUG] Raw response: primary='{loc.primary_address}', secondaries={list(loc.secondary_addresses)}")
         
         current_replicas = [loc.primary_address] + list(loc.secondary_addresses)
         current_replicas = [r for r in current_replicas if r] # filter out empty strings
         
         print(f"   [T+{i*2}s] Replica count: {len(current_replicas)} -> {current_replicas}")
         
-        # If we have 3 replicas again, AND the one we killed is no longer in the list!
         if len(current_replicas) == 3 and target_to_kill not in current_replicas:
             recovered = True
             break
@@ -69,21 +83,21 @@ def run_fault_test():
         time.sleep(2)
 
     if recovered:
-        print("\n✅ RE-REPLICATION SUCCESSFUL!")
+        print("\n RE-REPLICATION SUCCESSFUL!")
         print("   The Master detected the dead node, isolated it, and cloned the data to a surviving node.")
     else:
-        print("\n❌ RE-REPLICATION TIMED OUT.")
+        print("\n RE-REPLICATION TIMED OUT.")
         print("   Did the replication manager fail to trigger?")
 
     print("\n5. Verifying Data Integrity...")
-    client.cache.invalidate(FILE_PATH, 0) # Clear client cache to force new location fetch
+    client.cache.invalidate(FILE_PATH, 0)
     recovered_data = client.read(FILE_PATH, 0, DATA_SIZE)
     recovered_hash = hashlib.md5(recovered_data).hexdigest()
     
     if expected_hash == recovered_hash:
-        print("✅ DATA INTEGRITY VERIFIED! Hash matches perfectly despite the server crash.")
+        print(" DATA INTEGRITY VERIFIED! Hash matches perfectly despite the server crash.")
     else:
-        print("❌ DATA CORRUPTION DETECTED!")
+        print(" DATA CORRUPTION DETECTED!")
 
 if __name__ == "__main__":
     run_fault_test()

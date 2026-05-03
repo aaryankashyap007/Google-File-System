@@ -1,5 +1,6 @@
 import time
 import threading
+import sys
 from concurrent import futures
 import grpc
 import os
@@ -22,14 +23,12 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         self.oplog = OperationLog(f"{log_dir}/gfs.log")
         self.locks = NamespaceLockManager()
         self.heartbeat = HeartbeatMonitor(self.store)
-        self.lease_manager = LeaseManager(self.store)
+        self.lease_manager = LeaseManager(self.store, self.oplog)
         
-        # --- NEW COMPONENTS ---
         self.gc = GarbageCollector(self.store, self.oplog)
         self.repl = ReplicationManager(self.store, self.heartbeat)
+        self.heartbeat.replication = self.repl
         
-        # Monkey-patch the heartbeat monitor so it can trigger re-replication!
-        # (A bit hacky for the MVP, but it perfectly ties the components together)
         original_handle_failure = self.heartbeat._handle_chunkserver_failure
         def new_handle_failure(cs_address):
             original_handle_failure(cs_address)
@@ -38,11 +37,10 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 if len(meta.replicas) < 3:
                     self.repl.enqueue(handle, priority='high')
         self.heartbeat._handle_chunkserver_failure = new_handle_failure
-        # ----------------------
 
         self._restore_state()
         threading.Thread(target=self.heartbeat.check_dead_servers, daemon=True).start()
-        print("[Master] Initialized and ready.")
+        print("[Master] Initialized and ready.", flush=True)
 
     def _restore_state(self):
         """On startup: load checkpoint, then replay any subsequent log records."""
@@ -53,11 +51,12 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
             self.store.chunk_map = cp['chunk_map']
             self.store.chunk_versions = cp['chunk_versions']
             self.store._next_handle = cp['next_handle']
+            self.store._gc_pending = cp.get('_gc_pending', set())
             print("[Master] Restored state from checkpoint.")
             
         records = self.oplog.replay()
         for record in records:
-            # Replay logic (simplified for MVP)
+            # Replay logic
             if record['op'] == 'CREATE_FILE':
                 self.store.namespace[record['filename']] = FileMetadata(
                     path=record['filename'], 
@@ -69,6 +68,21 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 if filepath not in self.store.file_chunks:
                     self.store.file_chunks[filepath] = []
                 self.store.file_chunks[filepath].append(handle)
+            elif record['op'] == 'GRANT_LEASE':
+                handle = record['chunk_handle']
+                version = record['version']
+                self.store.chunk_versions[handle] = version
+            elif record['op'] == 'DELETE_FILE':
+                # Soft delete: rename to hidden
+                original_path = record['path']
+                hidden_path = record['hidden']
+                if original_path in self.store.namespace:
+                    file_meta = self.store.namespace[original_path]
+                    file_meta.deleted = True
+                    file_meta.hidden_name = hidden_path
+                    file_meta.deleted_at = record['ts']
+                    self.store.namespace[hidden_path] = file_meta
+                    del self.store.namespace[original_path]
         print(f"[Master] Replayed {len(records)} operations from log.")
 
     def CreateFile(self, request, context):
@@ -104,13 +118,10 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         if filepath not in self.store.namespace:
             context.abort(grpc.StatusCode.NOT_FOUND, "File not found")
 
-        # FIX: Acquire locks BEFORE checking chunk lengths to prevent concurrent 
-        # threads from creating multiple "first" chunks simultaneously!
         locks = self.locks.acquire_for_operation(filepath)
         try:
             file_chunks = self.store.file_chunks.get(filepath, [])
             
-            # Resolve -1 to the actual last chunk index safely inside the lock
             if chunk_index == -1:
                 if len(file_chunks) > 0:
                     chunk_index = len(file_chunks) - 1
@@ -130,31 +141,37 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 handle = self.store.allocate_chunk(filepath)
                 chosen = random.sample(active_servers, min(3, len(active_servers)))
                 self.store.chunk_map[handle].replicas = chosen
+                self.store.chunk_map[handle].primary = chosen[0]
                 
                 self.oplog.append('ALLOCATE_CHUNK', {'filename': filepath, 'chunk_handle': handle})
                 
                 chunk_index = len(self.store.file_chunks[filepath]) - 1
 
             chunk_handle = self.store.file_chunks[filepath][chunk_index]
+
+            # Read chunk metadata while still holding locks to prevent race conditions
+            chunk_meta = self.store.chunk_map[chunk_handle]
+            print(f"[DEBUG] Chunk {chunk_handle}: replicas={chunk_meta.replicas}, stale={chunk_meta.stale_replicas}, primary={chunk_meta.primary}", flush=True)
+            healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
+            
         finally:
             for lock in reversed(locks):
                 lock.release()
 
-        # The rest of the method remains exactly the same!
-        chunk_meta = self.store.chunk_map[chunk_handle]
-        healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
-        
         if not self.lease_manager.has_valid_lease(chunk_handle):
             self.lease_manager.grant_lease(chunk_handle)
 
+        chunk_meta = self.store.chunk_map[chunk_handle]
+        healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
         primary = chunk_meta.primary if chunk_meta.primary else ""
         secondaries = [r for r in healthy_replicas if r != primary]
+        chunk_version = self.store.chunk_versions.get(chunk_handle, 0)
 
         return master_pb2.ChunkLocResponse(
             chunk_handle=chunk_handle,
             primary_address=primary,
             secondary_addresses=secondaries,
-            chunk_version=self.store.chunk_versions.get(chunk_handle, 0)
+            chunk_version=chunk_version
         )
 
     def HeartBeat(self, request, context):

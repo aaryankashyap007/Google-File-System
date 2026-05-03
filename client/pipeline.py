@@ -50,7 +50,8 @@ class WritePipeline:
             offset=chunk_offset,
             data=data,
             serial_number=serial,
-            forward_to=secondaries
+            forward_to=secondaries,
+            chunk_version=loc.chunk_version
         )
         
         primary_stub = self._get_chunk_stub(primary)
@@ -62,7 +63,8 @@ class WritePipeline:
             offset=chunk_offset,
             data=b'', # Data is already buffered!
             serial_number=serial,
-            forward_to=secondaries
+            forward_to=secondaries,
+            chunk_version=loc.chunk_version
         )
         
         resp = primary_stub.WriteChunk(commit_req)
