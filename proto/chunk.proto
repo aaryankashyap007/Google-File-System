@@ -28,6 +28,7 @@ message WriteRequest {
   bytes          data = 3;
   int32          serial_number = 4;
   repeated string forward_to = 5;   
+  int32          chunk_version = 6;
 }
 
 message WriteResponse {
@@ -39,6 +40,7 @@ message AppendRequest {
   int64 chunk_handle = 1;
   bytes data = 2;
   repeated string forward_to = 3;
+  int32 chunk_version = 4;
 }
 
 message AppendResponse {
@@ -58,6 +60,7 @@ message DeleteResponse {
 message CopyRequest {
   int64 chunk_handle = 1;
   string target_address = 2;
+  int32 chunk_version = 3;
 }
 
 message CopyResponse {

@@ -2,6 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 COPY . /app
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir grpcio grpcio-tools protobuf
 RUN mkdir -p /data/oplog
@@ -9,6 +11,8 @@ RUN mkdir -p /data/oplog
 # Generate Python stubs
 RUN python -m grpc_tools.protoc -I./proto \
     --python_out=./master --grpc_python_out=./master ./proto/master.proto
+RUN python -m grpc_tools.protoc -I./proto \
+    --python_out=./chunkserver --grpc_python_out=./chunkserver ./proto/chunk.proto
 
 # Will fail to start until you implement server.py in Phase 1
 CMD ["python", "master/server.py"]

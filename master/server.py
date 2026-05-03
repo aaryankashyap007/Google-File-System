@@ -1,5 +1,6 @@
 import time
 import threading
+import sys
 from concurrent import futures
 import grpc
 import os
@@ -42,7 +43,7 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
 
         self._restore_state()
         threading.Thread(target=self.heartbeat.check_dead_servers, daemon=True).start()
-        print("[Master] Initialized and ready.")
+        print("[Master] Initialized and ready.", flush=True)
 
     def _restore_state(self):
         """On startup: load checkpoint, then replay any subsequent log records."""
@@ -130,31 +131,37 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 handle = self.store.allocate_chunk(filepath)
                 chosen = random.sample(active_servers, min(3, len(active_servers)))
                 self.store.chunk_map[handle].replicas = chosen
+                self.store.chunk_map[handle].primary = chosen[0]
                 
                 self.oplog.append('ALLOCATE_CHUNK', {'filename': filepath, 'chunk_handle': handle})
                 
                 chunk_index = len(self.store.file_chunks[filepath]) - 1
 
             chunk_handle = self.store.file_chunks[filepath][chunk_index]
+
+            # Read chunk metadata while still holding locks to prevent race conditions
+            chunk_meta = self.store.chunk_map[chunk_handle]
+            print(f"[DEBUG] Chunk {chunk_handle}: replicas={chunk_meta.replicas}, stale={chunk_meta.stale_replicas}, primary={chunk_meta.primary}", flush=True)
+            healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
+            
         finally:
             for lock in reversed(locks):
                 lock.release()
 
-        # The rest of the method remains exactly the same!
-        chunk_meta = self.store.chunk_map[chunk_handle]
-        healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
-        
         if not self.lease_manager.has_valid_lease(chunk_handle):
             self.lease_manager.grant_lease(chunk_handle)
 
+        chunk_meta = self.store.chunk_map[chunk_handle]
+        healthy_replicas = [r for r in chunk_meta.replicas if r not in chunk_meta.stale_replicas]
         primary = chunk_meta.primary if chunk_meta.primary else ""
         secondaries = [r for r in healthy_replicas if r != primary]
+        chunk_version = self.store.chunk_versions.get(chunk_handle, 0)
 
         return master_pb2.ChunkLocResponse(
             chunk_handle=chunk_handle,
             primary_address=primary,
             secondary_addresses=secondaries,
-            chunk_version=self.store.chunk_versions.get(chunk_handle, 0)
+            chunk_version=chunk_version
         )
 
     def HeartBeat(self, request, context):

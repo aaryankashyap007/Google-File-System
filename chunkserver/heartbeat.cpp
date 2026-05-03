@@ -31,7 +31,7 @@ void HeartbeatSender::run() {
         req.set_chunkserver_address(my_address_);
         for (auto h : handles) {
             req.add_chunk_handles(h);
-            req.add_chunk_versions(0); // MVP: Keeping versions simple for Phase 2
+            req.add_chunk_versions(storage_.get_version(h));
         }
 
         gfs::HeartBeatResponse resp;

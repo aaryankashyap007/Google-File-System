@@ -61,6 +61,8 @@ int32_t ChunkStorage::append(int64_t handle, const std::vector<uint8_t>& data) {
 
 void ChunkStorage::remove(int64_t handle) {
     fs::remove(chunk_path(handle));
+    std::lock_guard<std::mutex> lock(version_mutex_);
+    versions_.erase(handle);
 }
 
 std::vector<int64_t> ChunkStorage::list_all() {
@@ -82,4 +84,18 @@ int32_t ChunkStorage::get_size(int64_t handle) {
     std::string path = chunk_path(handle);
     if (!fs::exists(path)) return 0;
     return static_cast<int32_t>(fs::file_size(path));
+}
+
+void ChunkStorage::set_version(int64_t handle, int32_t version) {
+    std::lock_guard<std::mutex> lock(version_mutex_);
+    versions_[handle] = version;
+}
+
+int32_t ChunkStorage::get_version(int64_t handle) {
+    std::lock_guard<std::mutex> lock(version_mutex_);
+    auto it = versions_.find(handle);
+    if (it == versions_.end()) {
+        return 0;
+    }
+    return it->second;
 }

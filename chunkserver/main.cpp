@@ -20,8 +20,8 @@ using grpc::StatusCode;
 
 class ChunkServiceImpl final : public gfs::ChunkService::Service {
 public:
-    ChunkServiceImpl(const std::string& data_dir) 
-        : storage_(data_dir), checksum_(data_dir) {}
+    ChunkServiceImpl(ChunkStorage& storage, const std::string& data_dir)
+        : storage_(storage), checksum_(data_dir) {}
 
     Status ReadChunk(ServerContext* ctx, const gfs::ReadRequest* req, gfs::ReadResponse* resp) override {
         try {
@@ -50,6 +50,8 @@ public:
         std::vector<uint8_t> data(req->data().begin(), req->data().end());
         std::string key = std::to_string(req->chunk_handle()) + "_" + std::to_string(req->serial_number());
         buffer_.put(key, req->chunk_handle(), data);
+        
+        storage_.set_version(req->chunk_handle(), req->chunk_version());
         
         // Pipeline the data to the next secondary in the chain
         if (req->forward_to_size() > 0) {
@@ -89,6 +91,7 @@ public:
         // Apply locally to disk and update checksum
         storage_.write(req->chunk_handle(), req->offset(), data);
         checksum_.update(req->chunk_handle(), req->offset() / (64 * 1024), ChecksumStore::compute(data));
+        storage_.set_version(req->chunk_handle(), req->chunk_version());
 
         // Forward the commit command to all secondaries (Step 5)
         for (const std::string& secondary_addr : req->forward_to()) {
@@ -99,6 +102,7 @@ public:
             fwd_commit.set_chunk_handle(req->chunk_handle());
             fwd_commit.set_offset(req->offset());
             fwd_commit.set_serial_number(req->serial_number());
+            fwd_commit.set_chunk_version(req->chunk_version());
             // We DO NOT send the data payload again, it's already in their buffers!
             
             gfs::WriteResponse sec_resp;
@@ -152,6 +156,7 @@ public:
         
         // Update checksum
         checksum_.update(handle, offset / (64 * 1024), ChecksumStore::compute(data));
+        storage_.set_version(handle, req->chunk_version());
 
         // 3. Forward the exact append to secondaries
         for (const std::string& sec_addr : req->forward_to()) {
@@ -161,6 +166,7 @@ public:
             gfs::AppendRequest sec_req;
             sec_req.set_chunk_handle(handle);
             sec_req.set_data(req->data());
+            sec_req.set_chunk_version(req->chunk_version());
             // Clear forward_to so secondaries don't forward it again!
             
             gfs::AppendResponse sec_resp;
@@ -199,6 +205,7 @@ public:
             fwd_req.set_offset(0);
             fwd_req.set_data(std::string(data.begin(), data.end()));
             fwd_req.set_serial_number(999999); // Dummy serial for cloning
+            fwd_req.set_chunk_version(req->chunk_version());
 
             gfs::WriteResponse write_resp;
             grpc::ClientContext fwd_ctx;
@@ -223,7 +230,7 @@ public:
     }
 
 private:
-    ChunkStorage storage_;
+    ChunkStorage& storage_;
     ChecksumStore checksum_;
     WriteBuffer buffer_;
     
@@ -260,7 +267,7 @@ int main(int argc, char** argv) {
     heartbeat.start();
 
     // Start gRPC Server
-    ChunkServiceImpl service(data_dir);
+    ChunkServiceImpl service(storage, data_dir);
     ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);

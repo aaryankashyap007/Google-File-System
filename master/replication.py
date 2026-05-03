@@ -33,7 +33,7 @@ class ReplicationManager:
             try:
                 self._rereplicate(handle)
             except Exception as e:
-                print(f"[Replication] Failed for chunk {handle}: {e}")
+                print(f"[Replication] Failed for chunk {handle}: {e}", flush=True)
                 time.sleep(2)
                 self._queue.put((prio, handle))  # retry
 
@@ -44,7 +44,7 @@ class ReplicationManager:
 
         source = chunk.replicas[0] if chunk.replicas else None
         if not source:
-            print(f"[WARNING] Chunk {chunk_handle} has NO replicas — DATA LOST!")
+            print(f"[WARNING] Chunk {chunk_handle} has NO replicas — DATA LOST!", flush=True)
             return
 
         all_servers = list(self.heartbeat._last_seen.keys())
@@ -53,17 +53,18 @@ class ReplicationManager:
             return # No empty servers to replicate to
 
         target = targets[0]
-        print(f"[Replication] Cloning chunk {chunk_handle} from {source} to {target}...")
+        print(f"[Replication] Cloning chunk {chunk_handle} from {source} to {target}...", flush=True)
 
         # Instruct source to push to target
         stub = self._get_stub(source)
         resp = stub.CopyChunkTo(chunk_pb2.CopyRequest(
             chunk_handle=chunk_handle,
-            target_address=target
+            target_address=target,
+            chunk_version=self.store.chunk_versions.get(chunk_handle, 0)
         ))
         
         if resp.success:
             chunk.replicas.append(target)
-            print(f"[Replication] Success! Chunk {chunk_handle} restored to {len(chunk.replicas)} replicas.")
+            print(f"[Replication] Success! Chunk {chunk_handle} restored to {len(chunk.replicas)} replicas.", flush=True)
         else:
             raise Exception(resp.error_message)

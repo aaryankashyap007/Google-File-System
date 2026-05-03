@@ -119,7 +119,8 @@ class GFSClient:
         resp = stub.AppendChunk(chunk_pb2.AppendRequest(
             chunk_handle=raw.chunk_handle,
             data=data,
-            forward_to=secondaries
+            forward_to=secondaries,
+            chunk_version=raw.chunk_version
         ))
 
         if resp.retry_on_next_chunk:

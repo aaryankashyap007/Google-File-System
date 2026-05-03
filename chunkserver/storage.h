@@ -2,6 +2,8 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <mutex>
+#include <unordered_map>
 
 class ChunkStorage {
 public:
@@ -25,7 +27,13 @@ public:
     // Return size of chunk in bytes.
     int32_t get_size(int64_t handle);
 
+    // Store and retrieve the latest known chunk version.
+    void set_version(int64_t handle, int32_t version);
+    int32_t get_version(int64_t handle);
+
 private:
     std::string data_dir_;
+    std::mutex version_mutex_;
+    std::unordered_map<int64_t, int32_t> versions_;
     std::string chunk_path(int64_t handle) const;
 };
