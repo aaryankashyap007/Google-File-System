@@ -25,12 +25,10 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         self.heartbeat = HeartbeatMonitor(self.store)
         self.lease_manager = LeaseManager(self.store)
         
-        # --- NEW COMPONENTS ---
         self.gc = GarbageCollector(self.store, self.oplog)
         self.repl = ReplicationManager(self.store, self.heartbeat)
+        self.heartbeat.replication = self.repl
         
-        # Monkey-patch the heartbeat monitor so it can trigger re-replication!
-        # (A bit hacky for the MVP, but it perfectly ties the components together)
         original_handle_failure = self.heartbeat._handle_chunkserver_failure
         def new_handle_failure(cs_address):
             original_handle_failure(cs_address)
@@ -39,7 +37,6 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 if len(meta.replicas) < 3:
                     self.repl.enqueue(handle, priority='high')
         self.heartbeat._handle_chunkserver_failure = new_handle_failure
-        # ----------------------
 
         self._restore_state()
         threading.Thread(target=self.heartbeat.check_dead_servers, daemon=True).start()
@@ -58,7 +55,7 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
             
         records = self.oplog.replay()
         for record in records:
-            # Replay logic (simplified for MVP)
+            # Replay logic
             if record['op'] == 'CREATE_FILE':
                 self.store.namespace[record['filename']] = FileMetadata(
                     path=record['filename'], 
@@ -105,13 +102,10 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         if filepath not in self.store.namespace:
             context.abort(grpc.StatusCode.NOT_FOUND, "File not found")
 
-        # FIX: Acquire locks BEFORE checking chunk lengths to prevent concurrent 
-        # threads from creating multiple "first" chunks simultaneously!
         locks = self.locks.acquire_for_operation(filepath)
         try:
             file_chunks = self.store.file_chunks.get(filepath, [])
             
-            # Resolve -1 to the actual last chunk index safely inside the lock
             if chunk_index == -1:
                 if len(file_chunks) > 0:
                     chunk_index = len(file_chunks) - 1

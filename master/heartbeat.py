@@ -5,8 +5,9 @@ HEARTBEAT_INTERVAL = 5       # seconds between expected heartbeats
 HEARTBEAT_TIMEOUT  = 15      # seconds before a chunkserver is considered dead
 
 class HeartbeatMonitor:
-    def __init__(self, metadata_store):
+    def __init__(self, metadata_store, replication_manager=None):
         self.store = metadata_store
+        self.replication = replication_manager
         self._last_seen: dict[str, float] = {}   # address -> timestamp
         self._lock = threading.Lock()
 
@@ -28,6 +29,8 @@ class HeartbeatMonitor:
                     chunk_meta.replicas.remove(cs_address)
                 if cs_address not in chunk_meta.stale_replicas:
                     chunk_meta.stale_replicas.append(cs_address)
+                    if self.replication:
+                        self.replication.enqueue_stale_repair(handle, cs_address)
             else:
                 if cs_address not in chunk_meta.replicas:
                     chunk_meta.replicas.append(cs_address)
