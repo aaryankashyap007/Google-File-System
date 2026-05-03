@@ -23,7 +23,7 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
         self.oplog = OperationLog(f"{log_dir}/gfs.log")
         self.locks = NamespaceLockManager()
         self.heartbeat = HeartbeatMonitor(self.store)
-        self.lease_manager = LeaseManager(self.store)
+        self.lease_manager = LeaseManager(self.store, self.oplog)
         
         self.gc = GarbageCollector(self.store, self.oplog)
         self.repl = ReplicationManager(self.store, self.heartbeat)
@@ -51,6 +51,7 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
             self.store.chunk_map = cp['chunk_map']
             self.store.chunk_versions = cp['chunk_versions']
             self.store._next_handle = cp['next_handle']
+            self.store._gc_pending = cp.get('_gc_pending', set())
             print("[Master] Restored state from checkpoint.")
             
         records = self.oplog.replay()
@@ -67,6 +68,21 @@ class MasterServicer(master_pb2_grpc.MasterServiceServicer):
                 if filepath not in self.store.file_chunks:
                     self.store.file_chunks[filepath] = []
                 self.store.file_chunks[filepath].append(handle)
+            elif record['op'] == 'GRANT_LEASE':
+                handle = record['chunk_handle']
+                version = record['version']
+                self.store.chunk_versions[handle] = version
+            elif record['op'] == 'DELETE_FILE':
+                # Soft delete: rename to hidden
+                original_path = record['path']
+                hidden_path = record['hidden']
+                if original_path in self.store.namespace:
+                    file_meta = self.store.namespace[original_path]
+                    file_meta.deleted = True
+                    file_meta.hidden_name = hidden_path
+                    file_meta.deleted_at = record['ts']
+                    self.store.namespace[hidden_path] = file_meta
+                    del self.store.namespace[original_path]
         print(f"[Master] Replayed {len(records)} operations from log.")
 
     def CreateFile(self, request, context):

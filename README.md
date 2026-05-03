@@ -1,133 +1,275 @@
-# Google File System (GFS) MVP Replica
+# Google File System (GFS) MVP Implementation
 
-A highly concurrent, fault-tolerant distributed file system inspired by the original 2003 Google File System paper. This project implements the core architecture of GFS, featuring a decoupled control plane and a high-performance data plane to handle massive parallel workloads.
+This is a functional implementation of the Google File System architecture, as described in the 2003 GFS paper. The system demonstrates core distributed storage concepts including metadata management, chunk replication, lease-based consistency, fault tolerance, and automatic self-healing.
 
-## 📖 Context & Motivation
+## Overview
 
-The original 2003 GFS paper revolutionized distributed storage by shifting the industry paradigm: **component failures are the norm, not the exception.** Rather than relying on highly specialized, expensive, and fault-tolerant hardware, GFS was designed to run on clusters of cheap, commodity machines. 
+GFS was designed with the assumption that component failures are normal. This implementation runs on a cluster of containerized commodity nodes and handles node failures through automatic re-replication and stale replica repair. The architecture separates the control plane (Python Master) from the data plane (C++ Chunkservers), allowing metadata management to be centralized while data streaming occurs directly between clients and storage nodes.
 
-This MVP was built to practically explore and solve the massive concurrency, synchronization, and self-healing challenges that arise in such environments. By utilizing Python for rapid control-plane orchestration and C++ for bare-metal data plane performance, this project demonstrates a modern, containerized approach to classic distributed systems engineering.
+## System Architecture
 
----
+This implementation uses a containerized microservices architecture with gRPC for communication:
 
-## 🏗️ Architecture
+Master (Python):
+  - Manages all filesystem metadata in memory, backed by a write-ahead log (oplog)
+  - Grants leases to primary chunkservers for consistent mutation ordering
+  - Monitors chunkserver health via heartbeats (15-second timeout)
+  - Detects replica failures and triggers automatic re-replication
+  - Performs lazy garbage collection of deleted files
 
-This implementation utilizes a containerized microservices architecture communicating via **gRPC**:
+Chunkservers (C++):
+  - Store 64MB chunks on local disk
+  - Handle data streaming and pipelined writes
+  - Implement per-chunk locking for concurrent mutation serialization
+  - Perform checksums and verify data integrity
 
-* **The Master (Python):** The brain of the cluster. Maintains all filesystem metadata, manages access control, grants primary chunk leases, monitors Chunkserver health via 15-second heartbeats, and orchestrates lazy garbage collection and re-replication. Metadata is kept entirely in RAM for speed, backed by a Write-Ahead Log (Oplog).
-* **The Chunkservers (C++):** High-performance storage nodes that store physical 64MB chunks on local disk. They handle the heavy lifting of data streaming, concurrent mutation locking, and checksum verification.
-* **The Client (Python):** A smart library embedded in user applications that caches metadata to minimize Master bottlenecking and streams data directly to/from Chunkservers.
+Client (Python):
+  - Provides application-level API for file operations
+  - Caches metadata to reduce Master load
+  - Streams data directly to/from chunkservers
 
-### 🔄 How It Works Under the Hood
+## Core Mechanisms
 
-**The Read Path:**
+### Read Path
 1. The Client asks the Master for the chunk locations of a specific file.
 2. The Master replies with the replica addresses.
-3. The Client caches this metadata, connects directly to the closest Chunkserver, and streams the data, completely bypassing the Master to prevent bottlenecks.
+3. The Client caches metadata and reads directly from any replica.
 
-**The Write Path (Decoupled Data Flow):**
+### Write Path
 1. The Client asks the Master to allocate a new chunk or find the last chunk of a file.
-2. The Master grants a "Primary Lease" to one Chunkserver and designates the others as Secondaries.
-3. The Client pushes the raw bytes to a replica. The replicas forward the data to each other in a pipeline to maximize network bandwidth.
-4. Once all replicas have the data in their buffers, the Client signals the Primary. The Primary determines the serial write order, commits it to disk, and commands the Secondaries to commit in that exact same order.
+2. The Master grants a primary lease to one chunkserver.
+3. The client pushes data to all replicas in a pipeline (primary forwards to secondaries).
+4. The primary commits the data when all replicas acknowledge buffering.
+5. The primary commands secondaries to commit with the same serial number for consistency.
 
----
+### Atomic Record Append
+Multiple clients can concurrently append to the same file. The primary chunkserver serializes appends using per-chunk mutex locks, ensuring atomicity without client-side coordination.
 
-## ✨ Implemented Features
+### Fault Tolerance
+- The master monitors heartbeats from each chunkserver (expected every 5 seconds, timeout at 15 seconds)
+- Dead chunkservers are removed from all replica lists
+- Under-replicated chunks are re-replicated to healthy nodes
+- Stale replicas (version mismatch) are repaired by cloning from healthy sources
 
-This MVP faithfully reproduces the hardest distributed systems problems solved in the original GFS paper:
+### Garbage Collection
+Deleted files are soft-deleted (renamed to hidden namespace) and later permanently deleted lazily in the background.
+## Directory Structure
 
-1. **Decoupled Data Flow:** Clients get metadata from the Master but stream physical data directly to Chunkservers.
-2. **Write Pipelining & Leases:** The Master grants a "Primary Lease" to one chunkserver. The client pushes data to all replicas over a TCP pipeline, and the Primary dictates the serial write order to guarantee consistency.
-3. **Atomic Record Append:** Solves the "multiple concurrent writers" problem. Concurrent clients can blast data at the same file simultaneously; the Primary uses strict per-chunk mutex locks to serialize the appends, guaranteeing at-least-once atomic insertion without client-side locking.
-4. **Fault Tolerance & Self-Healing:** The Master monitors heartbeats. If a Chunkserver dies, the Master instantly evicts it, identifies under-replicated chunks, and commands surviving nodes to clone data to empty spare nodes.
-5. **Lazy Garbage Collection:** Files are soft-deleted and hidden. A background thread securely wipes orphaned metadata and commands Chunkservers to delete physical data during off-peak heartbeats.
-
----
-
-## 📂 File Structure
 ```text
 Google-File-System/
 ├── benchmarks/
-│   ├── bench_append.py       # Stress tests concurrent atomic record appends
-│   ├── bench_fault.py        # Chaos Monkey test for re-replication
-│   └── test_e2e.py           # Validates pipeline and client cache
+│   ├── bench_append.py       # Concurrent append stress test
+│   ├── bench_fault.py        # Server failure and re-replication test
+│   ├── bench_stale_repair.py # Stale replica detection and repair test
+│   └── test_e2e.py           # Basic end-to-end pipeline test
 ├── chunkserver/
 │   ├── CMakeLists.txt
-│   └── main.cpp              # C++ gRPC Server, Locking, and Checksums
-├── proto/                    # .proto definitions for Chunk/Master comms
+│   ├── main.cpp              # C++ gRPC service implementation
+│   ├── storage.h/cpp         # Chunk storage and version tracking
+│   ├── heartbeat.h/cpp       # Heartbeat sender
+│   ├── checksum.h/cpp        # Checksum computation
+│   └── buffer.h/cpp          # Write buffer for pipelined data
+├── proto/
+│   ├── master.proto          # Master service definitions
+│   └── chunk.proto           # Chunkserver service definitions
 ├── client/
-│   ├── gfs_client.py         # Client API and cache management
-│   └── pipeline.py           # Network pipeline for chunk streaming
+│   ├── gfs_client.py         # Client library and API
+│   ├── pipeline.py           # Write pipeline implementation
+│   └── cache.py              # Metadata cache
 ├── docker/
 │   ├── docker-compose.yml    # Topology: 1 Master, 4 Chunkservers
 │   ├── Dockerfile.chunkserver
 │   └── Dockerfile.master
 ├── master/
+│   ├── server.py             # Master gRPC service
+│   ├── metadata.py           # Metadata store and file namespace
 │   ├── garbage_collection.py # Soft-delete and background cleanup
+│   ├── heartbeat.py          # Heartbeat monitor
 │   ├── replication.py        # Self-healing clone orchestration
-│   └── server.py             # Python gRPC Server and lease management
+│   ├── lease.py              # Primary lease management
+│   └── oplog.py              # Write-ahead log
 └── README.md
 ```
 
-### 🔍 Deep Dive: Codebase Glossary
-
-**`/benchmarks`**
-* `test_e2e.py`: The primary validation script. It tests the complete lifecycle: file creation, chunk allocation, data pipelining, primary lease commitment, and client cache invalidation/retrieval.
-* `bench_append.py`: Proves thread safety. Spawns 10 concurrent threads mimicking separate users appending to the same file simultaneously, verifying the C++ mutex locks prevent race conditions.
-* `bench_fault.py`: The fault tolerance showcase. Writes a payload, pauses for a manual node kill (`docker stop`), and tracks the Master as it heals the cluster by cloning data to a spare node.
-
-**`/chunkserver`**
-* `main.cpp`: The C++ engine. Exposes gRPC endpoints to accept data streams, manage per-chunk mutex locking for concurrent appends, execute Master commands (like garbage collection or chunk cloning), and perform raw POSIX disk I/O.
-
-**`/client`**
-* `gfs_client.py`: The user-facing SDK. Applications import this to interact with the cluster. It manages the `MetadataCache` to minimize trips to the Master.
-* `pipeline.py`: Implements the decoupled data flow. Responsible for pushing byte streams to the chunkserver replicas and triggering the final commit command.
-
-**`/master`**
-* `server.py`: The central nervous system. Maintains the `MetadataStore` (namespace, chunk-to-file mappings) entirely in memory. Handles file creation, lease granting, and monitors chunkserver heartbeats.
-* `garbage_collection.py`: Implements "Lazy Deletion." Renames deleted files to a hidden `.trash` namespace. A background thread later permanently drops the metadata and instructs chunkservers to wipe the physical disks.
-* `replication.py`: The self-healing engine. Triggered when the heartbeat monitor detects a dead chunkserver. It calculates which chunks are under-replicated and orchestrates the copying of data from healthy nodes to spare nodes.
-
----
-
-## 🚀 Getting Started
+## Setup and Running
 
 ### Prerequisites
-* Docker
-* Docker Compose
-* Python 3.10+ (for running scripts locally, though tests can be run seamlessly inside the containers)
 
-### 1. Boot the Cluster
-The cluster consists of 1 Master and 4 C++ Chunkservers (3 active, 1 spare for self-healing).
+- Docker and Docker Compose
+
+### Starting the Cluster
+
+Build and start the cluster (1 Master + 4 Chunkservers):
+
 ```bash
-sudo docker-compose -f docker/docker-compose.yml up --build -d
+cd docker
+sudo docker compose up --build -d
 ```
-*(To view the cluster's internal logs, run: `sudo docker-compose -f docker/docker-compose.yml logs -f`)*
 
-### 2. Run the Test Suite
-The project includes three major integration benchmarks. Because the Docker network uses internal DNS resolution, the easiest way to run these tests is by executing them *inside* the Master container.
+Verify all containers are running:
 
-#### Test A: The Read/Write Pipeline
-Validates file creation, chunk allocation, data pipelining, and client-side metadata caching.
+```bash
+sudo docker ps
+```
+
+Expected output: docker-master-1, docker-chunkserver1-1, docker-chunkserver2-1, docker-chunkserver3-1, docker-chunkserver4-1.
+
+View cluster logs:
+
+```bash
+sudo docker compose logs -f
+```
+
+### Running the Automated Tests
+
+Tests are run inside the master container to ensure proper DNS resolution and cluster connectivity.
+
+#### Test 1: End-to-End Pipeline (test_e2e.py)
+
+Validates basic read/write functionality. Creates a file, writes data, and verifies the payload is read back correctly.
+
 ```bash
 sudo docker exec -it $(sudo docker ps -qf "name=master") python benchmarks/test_e2e.py
 ```
 
-#### Test B: Concurrency & Atomic Record Appends
-Spawns 10 concurrent threads that simultaneously blast records at the exact same file. Validates that the C++ Primary Chunkserver correctly locks and serializes the writes, preventing data corruption or race conditions.
+#### Test 2: Concurrent Atomic Appends (bench_append.py)
+
+Tests atomicity under concurrent load. Spawns 10 concurrent client threads appending records to the same file. Verifies no data loss or corruption due to race conditions.
+
 ```bash
 sudo docker exec -it $(sudo docker ps -qf "name=master") python benchmarks/bench_append.py
 ```
 
-#### Test C: The Chaos Monkey (Fault Tolerance)
-The ultimate test. The client writes a 3MB payload to the cluster. The script will pause and prompt you to manually kill one of the Docker chunkservers hosting the data. Once killed, you will watch the Master detect the heartbeat timeout, evict the node, and trigger the Replication Manager to clone the data to the 4th spare chunkserver.
+#### Test 3: Server Failure and Re-replication (bench_fault.py)
+
+Tests fault tolerance. Writes data to the cluster, then prompts you to manually stop one chunkserver. The test monitors as the master detects the failure and re-replicates data to a spare node. Verifies data integrity after recovery.
+
 ```bash
 sudo docker exec -it $(sudo docker ps -qf "name=master") python benchmarks/bench_fault.py
 ```
 
-### 3. Teardown
-To cleanly shut down the cluster and wipe the persistent storage volumes:
+When prompted, in a separate terminal:
+
 ```bash
-sudo docker-compose -f docker/docker-compose.yml down -v
+sudo docker stop docker-chunkserver1-1
 ```
+
+Then after the test indicates to restart:
+
+```bash
+sudo docker start docker-chunkserver1-1
+```
+
+#### Test 4: Stale Replica Detection and Repair (bench_stale_repair.py)
+
+Tests stale replica handling. Writes initial data to establish replicas, then stops one replica. While it is down, additional writes advance the chunk version on the remaining replicas. When the stopped replica is restarted, it comes back alive but stale. The master automatically detects the version mismatch and clones the updated data from a healthy replica.
+
+```bash
+sudo docker exec -it $(sudo docker ps -qf "name=master") python benchmarks/bench_stale_repair.py
+```
+
+Follow on-screen prompts to stop and start chunkserver1. To observe the master's stale replica list in real-time, open a separate terminal and tail:
+
+```bash
+sudo docker logs -f docker-master-1 | grep --line-buffered '\[DEBUG\] Chunk'
+```
+
+### Manual Testing
+
+For interactive exploration of the system, you can start a Python shell inside the master container and use the GFS client directly.
+
+```bash
+sudo docker exec -it $(sudo docker ps -qf "name=master") python
+```
+
+Then in the Python REPL:
+
+```python
+from client.gfs_client import GFSClient
+import time
+
+# Connect to the master
+client = GFSClient(master_addr='localhost:50051')
+
+# Create a file
+client.create_file('/test.txt')
+time.sleep(6)  # Wait for heartbeats to propagate
+
+# Write data
+data = b'Hello, GFS!'
+client.write('/test.txt', 0, data)
+
+# Read it back
+result = client.read('/test.txt', 0, len(data))
+print(result)  # Should print: b'Hello, GFS!'
+
+# Append records
+client.record_append('/test.txt', b'Appended record 1')
+client.record_append('/test.txt', b'Appended record 2')
+
+# Read the appended data
+appended = client.read('/test.txt', 0, 100)
+print(appended)
+```
+
+To monitor master activity while running manual commands:
+
+```bash
+sudo docker logs -f docker-master-1
+```
+
+To stop the cluster and clean up volumes:
+
+```bash
+cd docker
+sudo docker compose down -v
+```
+
+## Implementation Notes
+
+### Chunk Versioning
+
+Each chunk has an associated version number maintained by the master. When a lease is granted, the version is incremented. All replicas report their known version in heartbeats. Replicas whose reported version differs from the master's authoritative version are marked stale and scheduled for repair.
+
+### Write Consistency
+
+Writes are pipelined: the client sends data to the primary, which forwards to secondaries in order. Once all nodes acknowledge buffering, the client sends a commit RPC to the primary with a serial number. The primary commits to disk and commands secondaries to do the same, ensuring all replicas apply writes in the same order.
+
+### Heartbeat-Based Detection
+
+The heartbeat protocol uses a 5-second interval and 15-second timeout. Each heartbeat includes the chunkserver's address and all chunk handles and versions it currently stores. The master uses this information to detect failures, identify under-replicated chunks, and detect stale replicas.
+
+### Re-replication and Stale Repair
+
+When a chunkserver dies, the master removes it from all replicas and enqueues under-replicated chunks for cloning. When a stale replica is detected (version mismatch), it is enqueued for repair and a healthy replica is cloned to the stale node using the CopyChunkTo RPC.
+
+## Configuration
+
+Key constants are defined in the code:
+
+- Chunk size: 64 MB
+- Replication factor: 3
+- Heartbeat interval: 5 seconds
+- Heartbeat timeout: 15 seconds
+- Lease duration: 60 seconds
+- Max append size: 16 MB (1/4 of chunk)
+
+These values can be modified in the respective source files and the Docker images rebuilt.
+
+## Codebase Overview
+
+**benchmarks/:** Integration test suite covering pipelines, concurrency, fault tolerance, and self-healing.
+
+**chunkserver/:** C++ implementation of the storage nodes. Handles RPC endpoints for read, write, append, and copy operations; maintains per-chunk locking and checksums.
+
+**client/:** Python client library with metadata caching and pipelined write implementation.
+
+**master/:** Python implementation of the master server, metadata store, heartbeat monitor, lease manager, replication orchestrator, and garbage collector.
+
+**proto/:** Protocol buffer definitions for gRPC services.
+
+**docker/:** Docker configuration and build files.
+
+## References
+
+Ghemawat, S., Gobioff, H., & Leung, S. T. (2003). "The Google File System." Proceedings of the 19th ACM Symposium on Operating Systems Principles.

@@ -4,8 +4,9 @@ import threading
 LEASE_DURATION = 60   # seconds
 
 class LeaseManager:
-    def __init__(self, metadata_store):
+    def __init__(self, metadata_store, oplog):
         self.store = metadata_store
+        self.oplog = oplog
         self._lock = threading.Lock()
 
     def grant_lease(self, chunk_handle: int) -> str | None:
@@ -19,7 +20,9 @@ class LeaseManager:
                 return None
 
             # Increment version BEFORE notifying replicas
-            self.store.chunk_versions[chunk_handle] = self.store.chunk_versions.get(chunk_handle, 0) + 1
+            new_version = self.store.chunk_versions.get(chunk_handle, 0) + 1
+            self.store.chunk_versions[chunk_handle] = new_version
+            self.oplog.append('GRANT_LEASE', {'chunk_handle': chunk_handle, 'version': new_version})
             
             # Pick the first available healthy replica as primary
             primary = healthy_replicas[0]
